@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>分片迁移工作台 · Shard Migration Workbench</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="mark" aria-hidden="true">◧</div>
+    <div>
+      <h1>分片迁移工作台</h1>
+      <p class="sub">客户 · 订单同键路由 / 固定哈希 / 版本化路由 / 在线扩分片</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="algo-badge" id="algo-badge" title="固定哈希算法">fnv1a64-mod-n</div>
+    <button class="btn ghost small" id="theme-toggle" type="button">深色</button>
+    <button class="btn ghost small" id="reset-demo" type="button">重建演示数据</button>
+  </div>
+</header>
+
+<main class="shell">
+  <section class="stat-row" id="stat-row" aria-label="概览"></section>
+
+  <section class="card shard-board">
+    <div class="card-head">
+      <div>
+        <h2>分片与路由版本</h2>
+        <p class="hint">每位客户只有一个所有者分片；迁移期间非所有者分片可能保留副本，但永不路由。</p>
+      </div>
+      <button class="btn ghost small" id="audit-btn" type="button">运行一致性与审计</button>
+    </div>
+    <div class="shards" id="shard-cards"></div>
+    <div class="versions-wrap">
+      <div class="mini-head">路由版本表 <span class="dim">固定哈希 · 版本决定分片数</span></div>
+      <div class="table-scroll">
+        <table class="table compact" id="version-table">
+          <thead><tr><th>版本</th><th>算法</th><th class="num">分片数</th><th>状态</th><th>创建 / 退役</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="audit-line" id="audit-line" hidden></div>
+  </section>
+
+  <section class="card migration-card">
+    <div class="card-head">
+      <div>
+        <h2>迁移控制</h2>
+        <p class="hint">每个单元独立：复制 → 核验 → 原子切换。复制可中断、可从已确认暂存行续传。</p>
+      </div>
+      <span class="chip" id="migration-status-chip">尚未规划</span>
+    </div>
+    <div class="migration-meta" id="migration-meta" hidden></div>
+    <div class="progress-wrap" id="progress-wrap" hidden>
+      <div class="progress-label"><span>单元切换进度</span><strong id="progress-text">0 / 0</strong></div>
+      <div class="segbar" id="segbar" aria-hidden="true"></div>
+      <div class="legend" id="segbar-legend"></div>
+    </div>
+    <div class="action-row">
+      <button class="btn primary" id="plan-btn" type="button">新增分片并规划迁移</button>
+      <button class="btn" id="run-btn" type="button">运行全部单元</button>
+      <button class="btn ghost" id="cleanup-all-btn" type="button">清理全部旧副本</button>
+    </div>
+    <div class="presets">
+      <span class="dim">演练剧本：</span>
+      <button class="btn ghost small" data-scenario="interrupt-write-resume" type="button">中断 → 补写 → 续传</button>
+      <button class="btn ghost small" data-scenario="conflict" type="button">冲突 → 停止并留证</button>
+      <button class="btn ghost small" data-scenario="switch-view" type="button">切换前后对照</button>
+    </div>
+    <div class="table-scroll units-scroll">
+      <table class="table units-table" id="units-table">
+        <thead>
+          <tr>
+            <th>单元 / 客户</th><th>归属变化</th><th>状态</th>
+            <th class="num">源客户/订单</th><th class="num">暂存行</th>
+            <th>核验（源/暂存 · 指纹）</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="units-empty">还没有迁移。点击「新增分片并规划迁移」，会先展示哪些客户必须搬迁，再开始复制。</div>
+    <div class="conflict-panel" id="conflict-panel" hidden></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="card query-card">
+      <div class="card-head">
+        <div>
+          <h2>查一位客户</h2>
+          <p class="hint">查询走绑定 → 当前所有者。诊断直读按版本哈希落点，用来对照「路由说去哪」和「数据实际在哪」。</p>
+        </div>
+        <span class="chip neutral" id="customer-context">无迁移任务</span>
+      </div>
+      <div class="query-controls">
+        <label class="field grow">
+          <span>客户</span>
+          <select id="customer-select"></select>
+        </label>
+        <label class="field">
+          <span>查询方式</span>
+          <select id="query-mode">
+            <option value="owner">所有者（绑定）</option>
+            <option value="compare">切换前后三视图对照</option>
+          </select>
+        </label>
+        <button class="btn primary" id="query-btn" type="button">查询</button>
+      </div>
+      <div class="query-result" id="query-result" hidden></div>
+      <div class="write-box">
+        <div class="mini-head">新增订单 <span class="dim">写入归属随交换机切换，旧分片在交接后不再接收</span></div>
+        <div class="inline-form">
+          <label class="field grow"><span>客户</span><input type="text" id="order-customer" readonly></label>
+          <label class="field"><span>金额（分）</span><input type="number" id="order-amount" min="1" value="1999" step="1"></label>
+          <label class="field grow"><span>备注</span><input type="text" id="order-note" placeholder="可选" maxlength="60"></label>
+          <button class="btn" id="order-btn" type="button">新增订单</button>
+        </div>
+        <p class="result-note" id="write-result" hidden></p>
+      </div>
+      <div class="mini-head spaced">最近查询轨迹 <span class="dim">页面每次查询都会记录落点与依据</span></div>
+      <div class="table-scroll">
+        <table class="table compact" id="query-log-table">
+          <thead><tr><th>时间</th><th>客户</th><th>方式</th><th class="num">所有者分片</th><th class="num">订单</th><th>落点</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card plan-card">
+      <div class="card-head">
+        <div>
+          <h2>扩容切换计划</h2>
+          <p class="hint">同一客户及其订单共享一个路由键；以下客户在新版本下哈希位置改变，必须搬迁。</p>
+        </div>
+      </div>
+      <div class="table-scroll plan-scroll">
+        <table class="table compact" id="plan-table">
+          <thead><tr><th>客户</th><th class="num">当前绑定</th><th class="num">v旧 哈希</th><th class="num">v新 哈希</th><th>结论</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty-state small" id="plan-empty">规划后显示逐客户搬迁结论。</div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2>迁移事件</h2>
+        <p class="hint">复制、中断、核验、切换、清理、冲突均有记录；旧路由只有在全部单元切换后才退役。</p>
+      </div>
+    </div>
+    <ol class="event-list" id="event-list"></ol>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2>冲突证据 <span class="chip serious" id="conflict-count">0 条</span></h2>
+        <p class="hint">发现两边内容不同时停止该单元，保留两侧原文；不用最后写入覆盖。</p>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="table compact" id="conflict-table">
+        <thead><tr><th>客户</th><th>表 / 行</th><th>阶段</th><th class="evidence-cell">两侧证据（源 → 暂存）</th><th>处理</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty-state small" id="conflict-empty">暂无冲突。可用单元行的「注入冲突」制造一次，验证停止与留证行为。</div>
+  </section>
+
+  <footer class="footer">
+    <span>分片文件：<span id="shard-files" class="mono"></span></span>
+    <span class="dim">每个分片一个独立 SQLite 文件，无外部集群。</span>
+  </footer>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
